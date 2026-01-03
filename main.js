@@ -24,19 +24,28 @@ class EmbeddingManager {
         }
     }
 
-    async generateEmbeddings(texts) {
+    async generateEmbeddings(texts, onProgress) {
         if (!this.pipe) throw new Error("Model not loaded");
         
-        // Generate embeddings in parallel-ish
-        const output = await this.pipe(texts, { pooling: 'mean', normalize: true });
-        // output.data is a Float32Array of size [n_texts * 384]
-        // We need to reshape it
         const embeddings = [];
         const dims = 384; 
+        
         for (let i = 0; i < texts.length; i++) {
-            const start = i * dims;
-            const end = start + dims;
-            embeddings.push(Array.from(output.data.slice(start, end)));
+            const text = texts[i];
+            
+            // Generate single embedding
+            // output.data is Float32Array
+            const output = await this.pipe(text, { pooling: 'mean', normalize: true });
+            const embedding = Array.from(output.data);
+            
+            embeddings.push(embedding);
+            
+            if (onProgress) {
+                onProgress(i + 1, texts.length, text);
+            }
+            
+            // Small delay to allow UI to update if needed (though await usually handles it)
+            await new Promise(r => setTimeout(r, 0)); 
         }
         return embeddings;
     }
@@ -45,25 +54,41 @@ class EmbeddingManager {
 class DimensionalityReducer {
     static reduce(embeddings, targetDim = 3) {
         if (embeddings.length < targetDim + 1) {
-            // Not enough points for PCA, just pad/truncate or return random small placement
-            // For a demo, let's just use the first 3 dims if we have too few points
             return embeddings.map(e => e.slice(0, targetDim));
         }
 
-        // Transpose for pca-js (it expects variables as rows, data points as columns usually? 
-        // Actually pca-js expects: computeAdjustedData(data, eigenvectors)
-        // Let's verify pca-js format. It usually expects data as vector of vectors.
-        // But commonly it expects each INPUT to be a vector.
-        // Let's assume standard behavior: getEigenVectors(data). 
-        // Data in pca-js is usually Array<Array<Number>>.
-        
+        // 1. Get Eigenvectors
         const vectors = PCA.getEigenVectors(embeddings);
-        const topVectors = vectors.slice(0, targetDim);
-        const result = PCA.computeAdjustedData(embeddings, topVectors);
         
-        // Result is { adjustedData, formattedAdjustedData, ... }
-        // formattedAdjustedData is typically the projected data.
-        return result.formattedAdjustedData; 
+        // 2. Select Top K
+        // pca-js returns objects { eigenvalue: ..., vector: [...] }
+        const topVectors = vectors.slice(0, targetDim).map(v => v.eigenvector);
+        
+        // 3. Project Data (Manual Matrix Multiplication)
+        // Embeddings: N x D (N rows, D cols)
+        // TopVectors: K x D (K rows, D cols) -> We need D x K for multiplication if we treat vectors as columns
+        // Actually, topVectors from pca-js are likely already in a format where each vector is an array of size D.
+        
+        // We want Result = Embeddings * Transpose(TopVectors)
+        // (N x D) * (D x K) = (N x K)
+        
+        const N = embeddings.length;
+        const K = targetDim;
+        const projected = [];
+        
+        // Helper dot product
+        const dot = (a, b) => a.reduce((sum, val, i) => sum + val * b[i], 0);
+
+        for (let i = 0; i < N; i++) {
+            const row = [];
+            for (let j = 0; j < K; j++) {
+                // Project embedding[i] onto eigenvector[j]
+                row.push(dot(embeddings[i], topVectors[j]));
+            }
+            projected.push(row);
+        }
+
+        return projected;
     }
 }
 
@@ -254,13 +279,24 @@ const app = {
             status.textContent = `Generating embeddings for ${lines.length} items...`;
 
             try {
-                // 1. Generate Embeddings
-                const embeddings = await app.embeddingManager.generateEmbeddings(lines);
+                // 1. Generate Embeddings with Progress
+                const fileProgress = document.getElementById('progress-container');
+                const progressBar = document.getElementById('progress-bar');
+                const progressLabel = document.getElementById('progress-label');
+                
+                fileProgress.style.display = 'block';
+                progressBar.value = 0;
+                
+                const onProgress = (idx, total, text) => {
+                    const pct = Math.round((idx / total) * 100);
+                    progressBar.value = pct;
+                    progressLabel.textContent = `${pct}% - Generated for "${text.slice(0, 15)}..."`;
+                    console.log(`[${idx}/${total}] Embedding generated for: ${text}`);
+                };
+
+                const embeddings = await app.embeddingManager.generateEmbeddings(lines, onProgress);
                 
                 // 2. Reduce Dimensions (384 -> 3)
-                // Normalize points first for better visualization? 
-                // PCA usually handles it, but let's scale results for Three.js
-                // Scale factor: spread them out a bit
                 const reduced = DimensionalityReducer.reduce(embeddings, 3);
                 
                 // Normalize reduced coordinates to be roughly unit sphere size * spread
@@ -286,6 +322,7 @@ const app = {
                 // 3. Update Visualizer
                 app.visualizer.updatePoints(normalizedPoints, lines);
                 status.textContent = `Visualizing ${lines.length} embeddings.`;
+                fileProgress.style.display = 'none';
 
             } catch (err) {
                 console.error(err);
