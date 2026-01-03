@@ -1,306 +1,302 @@
 import './style.css';
-import { env, AutoModel, ones } from '@xenova/transformers';
-import Chart from 'chart.js/auto';
+import { env, pipeline } from '@xenova/transformers';
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import PCA from 'pca-js';
 
-// Throw an error if WebGPU is not supported
-if (!navigator.gpu) {
-  const err = 'WebGPU is not supported by this browser.';
-  alert(err)
-  throw Error(err);
-}
-
-env.backends.onnx.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/';
-env.backends.onnx.wasm.numThreads = 1;
+// Configuration
 env.allowLocalModels = false;
+env.backends.onnx.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/';
 
-// Reference the elements that we will need
-const ctx = document.getElementById('chart');
-const batchSizes = document.getElementById('batch-sizes');
-const xscale = document.getElementById('x-scale');
-const yscale = document.getElementById('y-scale');
-const sequenceLength = document.getElementById('sequence-length');
-const modelID = document.getElementById('model-id');
-const status = document.getElementById('status');
-const start = document.getElementById('start');
-const stop = document.getElementById('stop');
-const tests = document.getElementsByClassName('tests');
+class EmbeddingManager {
+    constructor() {
+        this.pipe = null;
+        this.modelId = 'Xenova/all-MiniLM-L6-v2';
+    }
 
-// Benchmark settings
-const NUM_WARMUP_STEPS = 3;
-const MODEL_CACHE = new Map();
-
-// Chart configuration
-const initChart = () => {
-  const config = {
-    type: 'line',
-    data: {
-      labels: [],
-      datasets: [],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          position: 'top',
-        },
-      },
-      scales: {
-        x: {
-          title: {
-            display: true,
-            text: 'Batch size',
-          },
-          min: 1,
-        },
-        y: {
-          title: {
-            display: true,
-            text: 'Time (ms)',
-          },
+    async loadModel(statusCallback) {
+        if (!this.pipe) {
+            statusCallback('Loading model (WebGPU/WASM)...');
+            this.pipe = await pipeline('feature-extraction', this.modelId, {
+                device: navigator.gpu ? 'webgpu' : 'wasm',
+            });
+            statusCallback('Model ready.');
         }
-      }
-    },
-  };
-  const chart = new Chart(ctx, config);
-  return chart;
-}
-let chart = initChart();
-const toggleScale = (axis, enabled) => {
-  chart.options.scales[axis].type = enabled ? 'logarithmic' : 'linear';
-  chart.update();
-}
-
-const getSelectedTests = () => {
-  return [...tests].filter(x => x.checked);
-}
-
-const updateDatasets = () => {
-  chart.data.datasets = getSelectedTests().map(test => {
-    const color = test.getAttribute('data-color');
-    return {
-      label: test.value,
-      data: [],
-      borderColor: `rgba(${color}, 1)`,
-      backgroundColor: `rgba(${color}, 0.5)`,
-    }
-  })
-  chart.update();
-}
-updateDatasets();
-[...tests].forEach(test => test.addEventListener('change', updateDatasets));
-
-xscale.addEventListener('change', () => toggleScale('x', xscale.checked));
-yscale.addEventListener('change', () => toggleScale('y', yscale.checked));
-
-const generateDummyInputs = (batch_size, seqLength) => {
-  const inputs = ones([batch_size, seqLength]);
-
-  const model_inputs = {
-    input_ids: inputs,
-    attention_mask: inputs,
-  }
-  return model_inputs;
-}
-
-let adapterInfo;
-let gpuHasFp16 = false;
-try {
-  // Shouldn't fail since the WebGPU model has loaded successfully
-  const adapter = await navigator.gpu.requestAdapter();
-  adapterInfo = await adapter.requestAdapterInfo();
-  gpuHasFp16 = adapter.features.has('shader-f16')
-} catch (err) {
-  adapterInfo = {};
-}
-if (!gpuHasFp16) {
-  const element = document.querySelector('.tests[data-device="webgpu"][data-dtype="fp16"]');
-  element.setAttribute('unsupported', true);
-  element.disabled = true;
-  element.title = 'This device does not support fp16 on WebGPU';
-}
-
-status.textContent = 'Ready';
-
-let interrupted = false;
-start.addEventListener('click', async () => {
-  const validTests = [...tests].filter(test => !test.getAttribute('unsupported'))
-  // Update UI
-  start.disabled = true;
-  stop.disabled = false;
-  batchSizes.disabled = true;
-  sequenceLength.disabled = true;
-  modelID.disabled = true;
-  validTests.forEach(test => test.disabled = true);
-  interrupted = false;
-
-  // Get parameters
-  const model_id = modelID.value;
-  const batch_sizes = batchSizes.value.split(',').map(x => parseInt(x)).filter(x => x);
-  const seqLength = parseInt(sequenceLength.value);
-  const selectedTests = getSelectedTests().map(x => ({
-    label: x.value,
-    dtype: x.getAttribute('data-dtype'),
-    device: x.getAttribute('data-device'),
-  }));
-
-  // Reset
-  chart.destroy();
-  chart = initChart();
-  updateDatasets();
-
-  // NOTE: Models must be loaded sequentially (otherwise it will fail due to multiple calls to initWasm())
-  const testsToRun = new Map();
-  for (const test of selectedTests) {
-    const { label, dtype, device, quantized } = test;
-
-    const key = `${model_id}///${label}`;
-
-    const cached = MODEL_CACHE.get(key);
-    if (cached) {
-      testsToRun.set(label, cached);
-      continue;
-    }
-    status.textContent = 'Loading model(s)...';
-
-    try {
-      const model = await AutoModel.from_pretrained(model_id, {
-        quantized,
-        device,
-        dtype,
-      });
-      MODEL_CACHE.set(key, model);
-      testsToRun.set(label, model);
-    } catch (err) {
-      status.textContent = err.message;
-      alert(err.message)
-      throw err;
-    }
-  }
-
-  status.textContent = 'Warming up...';
-
-  // Warm up: This is important for the WebGPU execution provider, which compiles the shaders on first load
-  for (let i = 0; i < NUM_WARMUP_STEPS; ++i) {
-    const model_inputs = generateDummyInputs(1, seqLength);
-    for (const [label, model] of testsToRun) {
-      await model(model_inputs);
-    }
-  }
-
-  status.textContent = 'Running benchmark...';
-
-  for (const batch_size of batch_sizes) {
-    if (interrupted) break;
-
-    const model_inputs = generateDummyInputs(batch_size, seqLength);
-
-    const times = []
-
-    for (const [label, model] of testsToRun) {
-      const start = performance.now();
-      await model(model_inputs);
-      const end = performance.now();
-      times.push(end - start);
     }
 
-    chart.data.labels.push(batch_size);
-    for (let i = 0; i < times.length; ++i) {
-      chart.data.datasets[i].data.push(times[i]);
+    async generateEmbeddings(texts) {
+        if (!this.pipe) throw new Error("Model not loaded");
+        
+        // Generate embeddings in parallel-ish
+        const output = await this.pipe(texts, { pooling: 'mean', normalize: true });
+        // output.data is a Float32Array of size [n_texts * 384]
+        // We need to reshape it
+        const embeddings = [];
+        const dims = 384; 
+        for (let i = 0; i < texts.length; i++) {
+            const start = i * dims;
+            const end = start + dims;
+            embeddings.push(Array.from(output.data.slice(start, end)));
+        }
+        return embeddings;
     }
-    chart.update();
-  }
-
-  // Calculate max speedup:
-  if (chart.data.labels.length === 0) return;
-
-  const testNames = [...testsToRun.keys()];
-  const table = generateResultsTable(model_id, testNames, chart.data, seqLength);
-
-
-  // Calculate slowest and fastest times
-  let minMaxTimes = [Infinity, 0];
-  let minMaxIndices = [0, 0];
-  for (let i = 0; i < chart.data.datasets.length; i++) {
-    const lastTime = chart.data.datasets[i].data.at(-1);
-    if (lastTime < minMaxTimes[0]) {
-      minMaxTimes[0] = lastTime;
-      minMaxIndices[0] = i;
-    }
-    if (lastTime > minMaxTimes[1]) {
-      minMaxTimes[1] = lastTime;
-      minMaxIndices[1] = i;
-    }
-  }
-
-  const speedup = minMaxTimes[1] / minMaxTimes[0];
-  const roundedSpeedup = speedup.toFixed(2);
-  const params = new URLSearchParams({
-    title: `⚡ WebGPU Benchmark Results (${roundedSpeedup}x speedup)`,
-    description: table.outerHTML,
-  });
-
-  const paramsStr = params.toString();
-  status.innerHTML = `⚡ Done! ${testNames.at(minMaxIndices[0])} is <strong>${roundedSpeedup}x</strong> faster than ${testNames.at(minMaxIndices[1])}! ⚡<br><a href="https://huggingface.co/spaces/Xenova/webgpu-embedding-benchmark/discussions/new?${paramsStr}" target="_blank">Share results</a>`;
-  start.disabled = false;
-  stop.disabled = true;
-  batchSizes.disabled = false;
-  sequenceLength.disabled = false;
-  modelID.disabled = false;
-  validTests.forEach(test => test.disabled = false);
-});
-
-start.disabled = false;
-
-stop.addEventListener('click', () => {
-  status.textContent = 'Stopping...';
-  interrupted = true;
-  stop.disabled = true;
-});
-
-function generateResultsTable(model_id, testNames, data, sequence_length) {
-
-  const datasets = data.datasets.map(d => d.data);
-  const batch_sizes = data.labels;
-
-  const container = document.createElement('div');
-
-  const table = document.createElement('table');
-  const thead = table.createTHead();
-  const tbody = table.createTBody();
-
-  // Add header row
-  const headerRow = thead.insertRow();
-  headerRow.insertCell().textContent = 'Batch Size';
-  testNames.forEach(model => {
-    headerRow.insertCell().textContent = model;
-  });
-
-  // Add data rows
-  batch_sizes.forEach((batchSize, rowIndex) => {
-    const row = tbody.insertRow();
-    row.insertCell().textContent = batchSize;
-    datasets.forEach(dataset => {
-      row.insertCell().textContent = dataset[rowIndex].toFixed(2);
-    });
-  });
-
-  container.appendChild(table);
-
-  const createBulletPoint = (text) => {
-    const li = document.createElement('li');
-    li.textContent = text;
-    return li;
-  }
-
-  // Add other information
-  const info = document.createElement('ul');
-  info.appendChild(createBulletPoint(`Model: ${model_id}`));
-  info.appendChild(createBulletPoint(`Tests run: ${testNames.join(', ')}`));
-  info.appendChild(createBulletPoint(`Sequence length: ${sequence_length}`));
-  info.appendChild(createBulletPoint(`Browser: ${navigator.userAgent}`));
-  info.appendChild(createBulletPoint(`GPU: vendor=${adapterInfo.vendor}, architecture=${adapterInfo.architecture}, device=${adapterInfo.device}, description=${adapterInfo.description}`));
-  container.appendChild(info);
-
-  return container;
 }
+
+class DimensionalityReducer {
+    static reduce(embeddings, targetDim = 3) {
+        if (embeddings.length < targetDim + 1) {
+            // Not enough points for PCA, just pad/truncate or return random small placement
+            // For a demo, let's just use the first 3 dims if we have too few points
+            return embeddings.map(e => e.slice(0, targetDim));
+        }
+
+        // Transpose for pca-js (it expects variables as rows, data points as columns usually? 
+        // Actually pca-js expects: computeAdjustedData(data, eigenvectors)
+        // Let's verify pca-js format. It usually expects data as vector of vectors.
+        // But commonly it expects each INPUT to be a vector.
+        // Let's assume standard behavior: getEigenVectors(data). 
+        // Data in pca-js is usually Array<Array<Number>>.
+        
+        const vectors = PCA.getEigenVectors(embeddings);
+        const topVectors = vectors.slice(0, targetDim);
+        const result = PCA.computeAdjustedData(embeddings, topVectors);
+        
+        // Result is { adjustedData, formattedAdjustedData, ... }
+        // formattedAdjustedData is typically the projected data.
+        return result.formattedAdjustedData; 
+    }
+}
+
+class Visualizer {
+    constructor(containerId) {
+        this.container = document.getElementById(containerId);
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.setPixelRatio(window.devicePixelRatio);
+        this.container.appendChild(this.renderer.domElement);
+
+        this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+        this.controls.enableDamping = true;
+        this.controls.autoRotate = true;
+        this.controls.autoRotateSpeed = 1.0;
+
+        this.raycaster = new THREE.Raycaster();
+        this.mouse = new THREE.Vector2();
+        
+        this.pointsMesh = null;
+        this.originalPositions = null;
+        this.labels = [];
+        
+        // Setup initial scene
+        this.camera.position.z = 5;
+        this.scene.fog = new THREE.FogExp2(0x050510, 0.1);
+        
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404040);
+        this.scene.add(ambientLight);
+        
+        // Resize handler
+        window.addEventListener('resize', this.onWindowResize.bind(this));
+        
+        // Mouse move for hover
+        window.addEventListener('mousemove', this.onMouseMove.bind(this));
+        
+        this.animate();
+    }
+
+    onWindowResize() {
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    onMouseMove(event) {
+        this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        this.checkIntersections();
+        
+        // Pause rotation when interacting
+        this.controls.autoRotate = false;
+        clearTimeout(this.rotationTimeout);
+        this.rotationTimeout = setTimeout(() => {
+            this.controls.autoRotate = true;
+        }, 2000);
+    }
+
+    checkIntersections() {
+        if (!this.pointsMesh) return;
+        
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        const intersects = this.raycaster.intersectObject(this.pointsMesh);
+        
+        const tooltip = document.getElementById('tooltip');
+        
+        if (intersects.length > 0) {
+            const index = intersects[0].index;
+            const text = this.labels[index];
+            
+            tooltip.textContent = text;
+            tooltip.style.opacity = 1;
+            tooltip.style.left = (event.clientX) + 'px';
+            tooltip.style.top = (event.clientY - 10) + 'px';
+            
+            // Highlight effect could go here (e.g. scale up point)
+            
+            // Reset cursor
+            document.body.style.cursor = 'pointer';
+        } else {
+            tooltip.style.opacity = 0;
+            document.body.style.cursor = 'default';
+        }
+    }
+
+    updatePoints(points3d, labels) {
+        this.labels = labels;
+        
+        // Remove old mesh
+        if (this.pointsMesh) {
+            this.scene.remove(this.pointsMesh);
+            this.pointsMesh.geometry.dispose();
+            this.pointsMesh.material.dispose();
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(points3d.length * 3);
+        const colors = new Float32Array(points3d.length * 3);
+        
+        const color1 = new THREE.Color(0x00ff88);
+        const color2 = new THREE.Color(0x00aaff);
+
+        points3d.forEach((pt, i) => {
+            // Normalize/Scale points to fit in view
+            // Simple normalization to -2..2 range
+            positions[i * 3] = pt[0];
+            positions[i * 3 + 1] = pt[1];
+            positions[i * 3 + 2] = pt[2];
+
+            // Mix colors based on position
+            const mixedColor = color1.clone().lerp(color2, (pt[0] + 2) / 4);
+            colors[i * 3] = mixedColor.r;
+            colors[i * 3 + 1] = mixedColor.g;
+            colors[i * 3 + 2] = mixedColor.b;
+        });
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        // Create texture for point
+        const sprite = new THREE.TextureLoader().load('https://threejs.org/examples/textures/sprites/disc.png');
+
+        const material = new THREE.PointsMaterial({ 
+            size: 0.2, 
+            vertexColors: true, 
+            map: sprite, 
+            transparent: true,
+            alphaTest: 0.5,
+            sizeAttenuation: true
+        });
+
+        this.pointsMesh = new THREE.Points(geometry, material);
+        this.scene.add(this.pointsMesh);
+        
+        // Center the camera on the points roughly
+        // (OrbitControls handles looking at 0,0,0)
+    }
+
+    animate() {
+        requestAnimationFrame(this.animate.bind(this));
+        
+        this.controls.update();
+
+        // Subtle pulse or movement could go here
+
+        this.renderer.render(this.scene, this.camera);
+    }
+}
+
+// Application Orchestrator
+const app = {
+    embeddingManager: new EmbeddingManager(),
+    visualizer: new Visualizer('canvas-container'),
+    
+    init: async () => {
+        const input = document.getElementById('text-input');
+        const btn = document.getElementById('generate-btn');
+        const loader = document.getElementById('loader');
+        const btnText = document.getElementById('btn-text');
+        const status = document.getElementById('status-msg');
+
+        // Initial load
+        try {
+            await app.embeddingManager.loadModel((msg) => {
+                status.textContent = msg;
+            });
+        } catch (e) {
+            console.error(e);
+            status.textContent = "Error loading model. Check console.";
+            return;
+        }
+
+        btn.addEventListener('click', async () => {
+            const text = input.value.trim();
+            if (!text) return;
+            
+            const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            if (lines.length === 0) return;
+
+            // UI Loading State
+            btn.disabled = true;
+            btnText.style.display = 'none';
+            loader.style.display = 'block';
+            status.textContent = `Generating embeddings for ${lines.length} items...`;
+
+            try {
+                // 1. Generate Embeddings
+                const embeddings = await app.embeddingManager.generateEmbeddings(lines);
+                
+                // 2. Reduce Dimensions (384 -> 3)
+                // Normalize points first for better visualization? 
+                // PCA usually handles it, but let's scale results for Three.js
+                // Scale factor: spread them out a bit
+                const reduced = DimensionalityReducer.reduce(embeddings, 3);
+                
+                // Normalize reduced coordinates to be roughly unit sphere size * spread
+                // Find bounds
+                let min = [Infinity, Infinity, Infinity];
+                let max = [-Infinity, -Infinity, -Infinity];
+                reduced.forEach(pt => {
+                    for(let i=0; i<3; i++) {
+                        if(pt[i] < min[i]) min[i] = pt[i];
+                        if(pt[i] > max[i]) max[i] = pt[i];
+                    }
+                });
+                
+                const range = max.map((mx, i) => mx - min[i] || 1); // Avoid div by 0
+                const scale = 4.0; // Target spread size
+                
+                const normalizedPoints = reduced.map(pt => [
+                    ((pt[0] - min[0]) / range[0]) * scale - (scale/2),
+                    ((pt[1] - min[1]) / range[1]) * scale - (scale/2),
+                    ((pt[2] - min[2]) / range[2]) * scale - (scale/2)
+                ]);
+
+                // 3. Update Visualizer
+                app.visualizer.updatePoints(normalizedPoints, lines);
+                status.textContent = `Visualizing ${lines.length} embeddings.`;
+
+            } catch (err) {
+                console.error(err);
+                status.textContent = "Error: " + err.message;
+            } finally {
+                btn.disabled = false;
+                btnText.style.display = 'inline';
+                loader.style.display = 'none';
+            }
+        });
+    }
+};
+
+app.init();
