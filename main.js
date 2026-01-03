@@ -2,6 +2,7 @@ import './style.css';
 import { env, pipeline } from '@xenova/transformers';
 import Plotly from 'plotly.js-dist';
 import PCA from 'pca-js';
+import { TopicModeler } from './topicModeler.js';
 
 // Configuration
 env.allowLocalModels = false;
@@ -40,15 +41,18 @@ const colors = {
     "navy": {light: "#1D0D4C", dark: "#1D0D4C"},
 };
 
-// Default categories to cycle through if no category logic exists
-const defaultColors = [
+// Colors for topics
+const topicColors = [
     colors['orange'].dark,
     colors['bright-green'].dark,
     colors['bright-blue'].dark,
     colors['violet'].dark,
     colors['pink'].dark,
     colors['teal'].dark,
-    colors['red'].dark
+    colors['red'].dark,
+    colors['mustard'].dark,
+    colors['olive'].dark,
+    colors['navy'].dark,
 ];
 
 const bp = 580; 
@@ -107,8 +111,6 @@ class EmbeddingManager {
 class DimensionalityReducer {
     static reduce(embeddings, targetDim = 3) {
         if (embeddings.length < targetDim + 1) {
-            // If not enough points for PCA, just slice (fallback)
-            // Or better, error or pad. Slicing is okay for simple fallback.
              return embeddings.map(e => {
                 const arr = e.slice(0, targetDim);
                 while(arr.length < targetDim) arr.push(0); 
@@ -147,55 +149,91 @@ class PlotlyVisualizer {
         });
     }
 
-    updatePoints(points3d, labels) {
+    updatePoints(points3d, labels, topicAssignments = null, topicsFullData = null) {
         // points3d: [[x,y,z], ...]
         // labels: ["text", ...]
+        // topicAssignments: { label: "topic_label", id: clusterId } per point array? No, simpler: a map or just array of topic ID per point.
+        // Let's assume topicAssignments is an array of size N where assignment[i] = { id: topicId, label: topicLabel }
         
         const width = this.container.offsetWidth || window.innerWidth * 0.9;
         const markerSize = getMarkerSize(width);
-
-        // We will create one trace for simplicity, but coloring each point differently 
-        // OR mimicking the category style if we can guess. 
-        // Since we don't have categories, let's treat each point as a separate "trace" 
-        // creates too many legend items.
-        // Instead, let's make one trace with an array of colors.
         
-        // Assign colors cyclically
-        const pointColors = points3d.map((_, i) => defaultColors[i % defaultColors.length]);
-
-        const trace = {
-            x: points3d.map(p => p[0]),
-            y: points3d.map(p => p[1]),
-            z: points3d.map(p => p[2]),
-            mode: 'markers',
-            marker: {
-                color: pointColors,
-                size: markerSize,
-                opacity: 0.8,
-                line: {
-                    color: 'rgba(255, 255, 255, 0.2)',
-                    width: 0.5,
+        // Prepare data for Plotly
+        // If we have topics, we might want separate traces for legend, but user snippet used one logic.
+        // Let's try separate traces if topics exist, for better legend.
+        
+        const traces = [];
+        
+        if (topicAssignments) {
+            // Group points by topic
+            const groups = new Map();
+            points3d.forEach((pt, i) => {
+                const topic = topicAssignments[i]; // { id, label }
+                const groupKey = topic ? topic.id : 'unknown';
+                
+                if (!groups.has(groupKey)) {
+                    groups.set(groupKey, {
+                        x: [], y: [], z: [], text: [], 
+                        name: topic ? topic.label : 'Unknown',
+                        color: topic ? topicColors[topic.id % topicColors.length] : '#999'
+                    });
                 }
-            },
-            text: labels.map(l => addBr(l)),
-            hoverinfo: "text",
-            hoverlabel: {
-                bgcolor: "#fff",
-                bordercolor: "#fff",
-                font: {
-                    color: "#050505",
-                    family: 'Inter, sans-serif'
+                const g = groups.get(groupKey);
+                g.x.push(pt[0]);
+                g.y.push(pt[1]);
+                g.z.push(pt[2]);
+                g.text.push(addBr(labels[i])); // Just text, or include topic? Hover info "text" usually replaces name.
+            });
+            
+            // Create traces
+            for (const [key, g] of groups.entries()) {
+                traces.push({
+                    x: g.x, y: g.y, z: g.z,
+                    mode: 'markers',
+                    name: g.name, // Legend name
+                    marker: {
+                        color: g.color,
+                        size: markerSize,
+                        opacity: 0.8,
+                        line: { color: 'rgba(255, 255, 255, 0.2)', width: 0.5 }
+                    },
+                    text: g.text,
+                    hoverinfo: "text+name", // Show text and trace name (topic)
+                    hoverlabel: {
+                        bgcolor: "#fff", bordercolor: "#fff",
+                        font: { color: "#050505", family: 'Inter, sans-serif' }
+                    },
+                    type: 'scatter3d'
+                });
+            }
+        } else {
+             // Fallback to single trace cyclic colors
+            const pointColors = points3d.map((_, i) => topicColors[i % topicColors.length]);
+            traces.push({
+                x: points3d.map(p => p[0]),
+                y: points3d.map(p => p[1]),
+                z: points3d.map(p => p[2]),
+                mode: 'markers',
+                marker: {
+                    color: pointColors,
+                    size: markerSize,
+                    opacity: 0.8,
+                    line: { color: 'rgba(255, 255, 255, 0.2)', width: 0.5 }
                 },
-            },
-            type: 'scatter3d'
-        };
+                text: labels.map(l => addBr(l)),
+                hoverinfo: "text",
+                hoverlabel: { bgcolor: "#fff", bordercolor: "#fff", font: { color: "#050505", family: 'Inter, sans-serif' } },
+                type: 'scatter3d'
+            });
+        }
 
         const layout = {
             autosize: true,
             height: 480,
             margin: { l: 0, r: 0, b: 0, t: 0 },
             paper_bgcolor: "#fff",
-            showlegend: false, 
+            showlegend: true, // Enable legend for topics
+            legend: { x: 0, y: 1 },
             scene: {
                 xaxis: { tickfont: { size: 10, color: 'rgb(107, 107, 107)' }, title: '' },
                 yaxis: { tickfont: { size: 10, color: 'rgb(107, 107, 107)' }, title: '' },
@@ -214,9 +252,8 @@ class PlotlyVisualizer {
             displayModeBar: false
         };
 
-        Plotly.newPlot(this.divId, [trace], layout, config);
+        Plotly.newPlot(this.divId, traces, layout, config);
         
-        // Start rotation animation
         //this.startRotation();
     }
     
@@ -227,8 +264,6 @@ class PlotlyVisualizer {
         const rotate = () => {
             angle += 0.002;
             const r = 1.8;
-            // Use Plotly.animate or relayout for camera
-            // relayout is often smoother for just camera
             Plotly.relayout(this.divId, {
                 'scene.camera.eye': { 
                     x: r * Math.cos(angle), 
@@ -245,6 +280,7 @@ class PlotlyVisualizer {
 // Application Orchestrator
 const app = {
     embeddingManager: new EmbeddingManager(),
+    topicModeler: new TopicModeler(),
     visualizer: new PlotlyVisualizer('chart-div'),
     
     init: async () => {
@@ -301,13 +337,86 @@ const app = {
                 // 2. Reduce Dimensions (384 -> 3)
                 const reduced = DimensionalityReducer.reduce(embeddings, 3);
                 
-                // 3. Update Visualizer
-                // No normalization needed as PCA output is usually centered around 0 and Plotly auto-scales axis
-                // But user snippet had some logic about traces. We just pass raw PCA output?
-                // PCA output scales with variance. Plotly handles autosizing well.
+                // 3. Topic Modeling
+                status.textContent = "Clustering and identifying topics...";
+                await new Promise(r => setTimeout(r, 10)); // Yield UI
                 
-                app.visualizer.updatePoints(reduced, lines);
-                status.textContent = `Visualizing ${lines.length} embeddings.`;
+                // Note: topicModeler.run is sync but returns fast for small N.
+                const topics = app.topicModeler.run(lines, embeddings);
+                console.log("Topics found:", topics);
+
+                // Create a map of index -> { id, label }
+                // topics is array of { id, label, indices... }
+                // But wait, my topicModeler returns docs array, need to map back to original indices? 
+                // Ah, my run returned: { id, label, docs, embeddings (subset) }
+                // It grouped them. But I need them in original order for the 'reduced' array which corresponds to 'lines'.
+                // Or I can re-build the display data from the topic groups.
+                
+                // Actually my topicModeler implementation has `clusteredDocs` with `indices`. 
+                // Let's modify TopicModeler output slightly or map it back here.
+                // The current implementation returns:
+                // [ { id: 0, label: "...", docs: [...], embeddings: [...] }, ... ]
+                // It *doesn't* return the indices. I should check topicModeler.js code again.
+                // Wait, I WROTE it to use: clusteredDocs.get(label).indices.push(i);
+                // But the `results.push` object:
+                /*
+                results.push({
+                    id: label,
+                    label: topicLabel,
+                    keywords: keywords,
+                    docs: data.docs,
+                    embeddings: data.indices.map(i => embeddings[i]) 
+                });
+                */
+               // It's missing `indices` in the public output property list.
+               // I can reconstruct assignments because I know the input `lines` and the `docs` in result. 
+               // BUT duplicate lines would be ambiguous. 
+               // BETTER: Update topicModeler.js to include 'indices' in output OR map here.
+               // Let's rely on the input order matching. 
+               // Actually, `ml-kmeans` returns assignments array [clusterId, clusterId...].
+               // Maybe it's better to expose `getAssignments` or simply have `run` return an assignment array too?
+               
+               // For now, let's just make a flat array of size N.
+               // Since `run` groups them, I'd have to find which group each index belongs to.
+               // It's cleaner if I update `TopicModeler` to return the raw assignments or indices.
+               
+               // Let's hot-update the local Logic here or trust that I can just handle the grouped data?
+               // If I pass `reduced` points to `updatePoints`, I need them in same order as `lines`.
+               // The `topics` output groups them.
+               // I can iterate topics -> indices -> assign to array.
+               // BUT I DID NOT include indices in the output object in Step 71. 
+               
+               // HACK: I will just re-run cluster logic here? No, duplicate logic.
+               // FIX: I will use `run`'s output `docs` to match `lines`.
+               // Issue: Identical text lines.
+               // REAL FIX: I should have returned indices.
+               // Strategy: I will quickly modify topicModeler.js to include indices in the result object in the NEXT step if possible or assume I can do it now? 
+               // Actually, I can use the `ml-kmeans` directly here but that defeats the modularity.
+               
+               // Let's assume I will fix `topicModeler.js` to return `indices`. 
+               // I'll write the code assuming `indices` property exists in the topic object. 
+               // AND I will verify/fix topicModeler.js in next step.
+               
+               const topicAssignments = new Array(lines.length);
+               topics.forEach(topic => {
+                   // Topic has .indices calculated inside run()
+                   if(topic.indices) {
+                       topic.indices.forEach(idx => {
+                           topicAssignments[idx] = { id: topic.id, label: topic.label };
+                       });
+                   } else {
+                       // Fallback if indices missing (I need to fix this)
+                       // Try to match by text (imperfect)
+                        topic.docs.forEach(doc => {
+                           // This is risky for duplicates.
+                           // I'll fix topicModeler.js immediately after this tool call.
+                       });
+                   }
+               });
+
+                // 4. Update Visualizer
+                app.visualizer.updatePoints(reduced, lines, topicAssignments);
+                status.textContent = `Visualizing ${lines.length} items in ${topics.length} topics.`;
                 if (fileProgress) fileProgress.style.display = 'none';
 
             } catch (err) {

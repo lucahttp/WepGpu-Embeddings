@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@xenova/transformers": "latest",
+    "ml-kmeans": "^7.0.0",
     "pca-js": "^2.0.6",
     "plotly.js-dist": "^3.3.1"
   }
