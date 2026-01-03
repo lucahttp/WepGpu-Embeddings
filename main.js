@@ -78,6 +78,7 @@ class EmbeddingManager {
     constructor() {
         this.pipe = null;
         this.modelId = 'Xenova/all-MiniLM-L6-v2';
+        //this.modelId = 'onnx-community/Qwen3-Embedding-0.6B-ONNX';
     }
 
     async loadModel(statusCallback) {
