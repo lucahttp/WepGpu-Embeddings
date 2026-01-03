@@ -14,6 +14,6 @@
   "dependencies": {
     "@xenova/transformers": "latest",
     "pca-js": "^2.0.6",
-    "three": "^0.182.0"
+    "plotly.js-dist": "^3.3.1"
   }
 }

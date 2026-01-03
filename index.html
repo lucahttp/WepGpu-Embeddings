@@ -1,42 +1,93 @@
-<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Transformers.js | 3D Embedding Visualizer</title>
+  <title>Embeddings 3D (Plotly) | Transformers.js</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+      body { margin: 0; padding: 0; font-family: 'Inter', sans-serif; background-color: #ffffff; }
+      /*
+      .observablehq {
+          position: relative;
+          width: 100%;
+          max-width: 1000px;
+          margin: 0 auto;
+      }
+          */
+      .legend-swatch {
+          width: 0.5rem;
+          height: 0.5rem;
+          display: inline-block;
+          border-radius: 50%;
+          margin-right: 0.3rem;
+      }
+      .legend-item {
+          margin-right: 1.5rem;
+          font-size: 0.875rem;
+          color: #6e6e80;
+          display: inline-flex;
+          align-items: center;
+      }
+      .small-copy {
+          display: flex;
+          justify-content: center;
+          flex-wrap: wrap;
+          margin-top: 1rem;
+          margin-bottom: 2rem;
+      }
+      /* Keep existing spinner */
+      .spinner {
+          border: 4px solid rgba(0, 0, 0, 0.1);
+          width: 24px;
+          height: 24px;
+          border-radius: 50%;
+          border-left-color: #09f;
+          animation: spin 1s ease infinite;
+          display: inline-block;
+          vertical-align: middle;
+      }
+      @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
 </head>
-<body>
-  <div id="app">
-    <div id="ui-layer">
-      <header>
-        <h1>Embedding Space</h1>
-        <p>Powered by <a href="https://github.com/huggingface/transformers.js" target="_blank">🤗 Transformers.js</a> & WebGPU</p>
-      </header>
-      
-      <div id="controls" class="glass-panel">
-        <div class="input-group">
-          <label for="text-input">Enter text to embed (one per line)</label>
-          <textarea id="text-input" rows="5" placeholder="King&#10;Queen&#10;Man&#10;Woman&#10;Apple&#10;Banana&#10;Computer&#10;Keyboard"></textarea>
-        </div>
-        <div class="button-group">
-          <button id="generate-btn" class="primary-btn">
-            <span id="btn-text">Visualize Embeddings</span>
-            <div id="loader" class="spinner" style="display: none;"></div>
-          </button>
-        </div>
-        <div id="status-msg">Model loading...</div>
-        
-        <div id="progress-container" style="display: none; margin-top: 10px;">
-          <progress id="progress-bar" value="0" max="100" style="width: 100%;"></progress>
-          <div id="progress-label" style="font-size: 0.8rem; color: #aaa; text-align: center;">0%</div>
-        </div>
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+  <div class="w-full max-w-5xl">
+      <!-- Header -->
+      <div class="mb-2 text-center">
+          <h1 class="text-3xl font-bold text-gray-900">Embeddings: 3D (Plotly)</h1>
+          <p class="text-sm text-gray-500 mt-2">Powered by Transformers.js & WebGPU</p>
       </div>
 
-      <div id="tooltip" class="glass-tooltip" style="opacity: 0;"></div>
-    </div>
-    
-    <div id="canvas-container"></div>
+      <!-- Controls (Adapted) -->
+      <div id="controls" class="bg-white p-4 rounded-lg shadow-sm border border-gray-200 mb-6 max-w-2xl mx-auto">
+          <div class="mb-4">
+              <label for="text-input" class="block text-sm font-medium text-gray-700 mb-1">Enter text to embed (one per line)</label>
+              <textarea id="text-input" rows="4" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm" placeholder="King&#10;Queen&#10;Man&#10;Woman&#10;Apple&#10;Banana&#10;Computer&#10;Keyboard"></textarea>
+          </div>
+          <div class="flex items-center justify-between">
+              <button id="generate-btn" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                  <span id="btn-text">Visualize Embeddings</span>
+                  <div id="loader" class="spinner ml-2" style="display: none;"></div>
+              </button>
+              <div id="status-msg" class="text-sm text-gray-500">Model loading...</div>
+          </div>
+          
+          <div id="progress-container" class="mt-4 hidden">
+              <div class="w-full bg-gray-200 rounded-full h-2.5">
+                  <div id="progress-bar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
+              </div>
+              <div id="progress-label" class="text-xs text-gray-500 text-center mt-1">0%</div>
+          </div>
+      </div>
+
+      <!-- Legend -->
+      <div id="legend-container"></div>
+
+      <!-- Chart -->
+      <div id="chart-div" style="min-height: 500px;"></div>
   </div>
+
   <script type="module" src="/main.js"></script>
 </body>
 </html>

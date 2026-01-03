@@ -1,12 +1,74 @@
 import './style.css';
 import { env, pipeline } from '@xenova/transformers';
-import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import Plotly from 'plotly.js-dist';
 import PCA from 'pca-js';
 
 // Configuration
 env.allowLocalModels = false;
 env.backends.onnx.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/';
+
+// --- Visualization Config & Helpers (from User Snippet) ---
+const colors = {
+    "light-warm-gray": {light:"#EEEDEE", dark: "#EEEDEE"},
+    "dark-warm-gray": {light:"#A3ACB0", dark: "#A3ACB0"},
+    "cool-gray-0.5": {light:"#EDEEF1", dark: "#EDEEF1"},
+    "cool-gray-1": {light:"#C5C5D2", dark: "#AEAEBB"},
+    "cool-gray-1.5": {light:"#AEAEBB", dark: "#8E8EA0"},
+    "cool-gray-2": {light:"#8E8EA0", dark: "#6E6E80"},
+    "cool-gray-3": {light:"#6E6E80", dark: "#404452"},
+    "cool-gray-4": {light:"#404452", dark: "#404452"},
+    "light-black": {light:"#191927", dark: "#191927"},
+    "medium-black": {light:"#0E0E1A", dark: "#0E0E1A"},
+    "black": {light:"#050505", dark: "#050505"},
+    "dark-red": {light: "#BD1C5F", dark: "#BD1C5F"},
+    "red": {light: "#F22C3D", dark: "#F22C3D"},
+    "green": {light: "#00A67D", dark: "#099A77"},
+    "blue": {light: "#0082D0", dark: "#0082D0"},
+    "orange": {light: "#FF5828", dark: "#FF5828"},
+    "teal": {light: "#21B5C2", dark: "#21B5C2"},
+    "mustard": {light: "#EA9100", dark: "#EA9100"},
+    "yellow": {light: "#EBE93D", dark: "#DDDB11"},
+    "violet": {light: "#5436DA", dark: "#5436DA"},
+    "bright-green": {light: "#54F16C", dark: "#00DE22"},
+    "bright-yellow": {light: "#EAFF00", dark: "#EAFF00"},
+    "bright-blue": {light: "#00B7FF", dark: "#00B7FF"},
+    "light-violet": {light: "#9388F7", dark: "#9388F7"},
+    "pink": {light: "#F2BAFF", dark: "#F2BAFF"},
+    "light-blue": {light: "#CAE5F2", dark: "#A5CFE4"},
+    "gold": {light: "#B2943A", dark: "#B2943A"},
+    "olive": {light: "#7E813C", dark: "#7E813C"},
+    "navy": {light: "#1D0D4C", dark: "#1D0D4C"},
+};
+
+// Default categories to cycle through if no category logic exists
+const defaultColors = [
+    colors['orange'].dark,
+    colors['bright-green'].dark,
+    colors['bright-blue'].dark,
+    colors['violet'].dark,
+    colors['pink'].dark,
+    colors['teal'].dark,
+    colors['red'].dark
+];
+
+const bp = 580; 
+function getMarkerSize(width) {
+    return (width > bp) ? 8 : 6;
+}
+
+function addBr(text) {
+    let result = "";
+    text = text || "";
+    text.trim().split("").forEach(function (item, index) {
+        result = result + item;
+        if (index !== 0 && index % 30 === 0) {
+            result = result + "<br>";
+        }
+    });
+    return result;
+}
+
+// --- Logic Classes ---
 
 class EmbeddingManager {
     constructor() {
@@ -28,23 +90,14 @@ class EmbeddingManager {
         if (!this.pipe) throw new Error("Model not loaded");
         
         const embeddings = [];
-        const dims = 384; 
-        
+        // Local generation
         for (let i = 0; i < texts.length; i++) {
             const text = texts[i];
-            
-            // Generate single embedding
-            // output.data is Float32Array
             const output = await this.pipe(text, { pooling: 'mean', normalize: true });
             const embedding = Array.from(output.data);
-            
             embeddings.push(embedding);
             
-            if (onProgress) {
-                onProgress(i + 1, texts.length, text);
-            }
-            
-            // Small delay to allow UI to update if needed (though await usually handles it)
+            if (onProgress) onProgress(i + 1, texts.length, text);
             await new Promise(r => setTimeout(r, 0)); 
         }
         return embeddings;
@@ -54,198 +107,145 @@ class EmbeddingManager {
 class DimensionalityReducer {
     static reduce(embeddings, targetDim = 3) {
         if (embeddings.length < targetDim + 1) {
-            return embeddings.map(e => e.slice(0, targetDim));
+            // If not enough points for PCA, just slice (fallback)
+            // Or better, error or pad. Slicing is okay for simple fallback.
+             return embeddings.map(e => {
+                const arr = e.slice(0, targetDim);
+                while(arr.length < targetDim) arr.push(0); 
+                return arr;
+            });
         }
 
-        // 1. Get Eigenvectors
         const vectors = PCA.getEigenVectors(embeddings);
-        
-        // 2. Select Top K
-        // pca-js returns objects { eigenvalue: ..., vector: [...] }
         const topVectors = vectors.slice(0, targetDim).map(v => v.eigenvector);
-        
-        // 3. Project Data (Manual Matrix Multiplication)
-        // Embeddings: N x D (N rows, D cols)
-        // TopVectors: K x D (K rows, D cols) -> We need D x K for multiplication if we treat vectors as columns
-        // Actually, topVectors from pca-js are likely already in a format where each vector is an array of size D.
-        
-        // We want Result = Embeddings * Transpose(TopVectors)
-        // (N x D) * (D x K) = (N x K)
         
         const N = embeddings.length;
         const K = targetDim;
         const projected = [];
         
-        // Helper dot product
         const dot = (a, b) => a.reduce((sum, val, i) => sum + val * b[i], 0);
 
         for (let i = 0; i < N; i++) {
             const row = [];
             for (let j = 0; j < K; j++) {
-                // Project embedding[i] onto eigenvector[j]
                 row.push(dot(embeddings[i], topVectors[j]));
             }
             projected.push(row);
         }
-
         return projected;
     }
 }
 
-class Visualizer {
-    constructor(containerId) {
-        this.container = document.getElementById(containerId);
-        this.scene = new THREE.Scene();
-        this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+class PlotlyVisualizer {
+    constructor(divId) {
+        this.divId = divId;
+        this.container = document.getElementById(divId);
         
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.setPixelRatio(window.devicePixelRatio);
-        this.container.appendChild(this.renderer.domElement);
-
-        this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-        this.controls.enableDamping = true;
-        this.controls.autoRotate = true;
-        this.controls.autoRotateSpeed = 1.0;
-
-        this.raycaster = new THREE.Raycaster();
-        this.mouse = new THREE.Vector2();
-        
-        this.pointsMesh = null;
-        this.originalPositions = null;
-        this.labels = [];
-        
-        // Setup initial scene
-        this.camera.position.z = 5;
-        this.scene.fog = new THREE.FogExp2(0x050510, 0.1);
-        
-        // Lighting
-        const ambientLight = new THREE.AmbientLight(0x404040);
-        this.scene.add(ambientLight);
-        
-        // Resize handler
-        window.addEventListener('resize', this.onWindowResize.bind(this));
-        
-        // Mouse move for hover
-        window.addEventListener('mousemove', this.onMouseMove.bind(this));
-        
-        this.animate();
-    }
-
-    onWindowResize() {
-        this.camera.aspect = window.innerWidth / window.innerHeight;
-        this.camera.updateProjectionMatrix();
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-    }
-
-    onMouseMove(event) {
-        this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-        this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-        this.checkIntersections();
-        
-        // Pause rotation when interacting
-        this.controls.autoRotate = false;
-        clearTimeout(this.rotationTimeout);
-        this.rotationTimeout = setTimeout(() => {
-            this.controls.autoRotate = true;
-        }, 2000);
-    }
-
-    checkIntersections() {
-        if (!this.pointsMesh) return;
-        
-        this.raycaster.setFromCamera(this.mouse, this.camera);
-        const intersects = this.raycaster.intersectObject(this.pointsMesh);
-        
-        const tooltip = document.getElementById('tooltip');
-        
-        if (intersects.length > 0) {
-            const index = intersects[0].index;
-            const text = this.labels[index];
-            
-            tooltip.textContent = text;
-            tooltip.style.opacity = 1;
-            tooltip.style.left = (event.clientX) + 'px';
-            tooltip.style.top = (event.clientY - 10) + 'px';
-            
-            // Highlight effect could go here (e.g. scale up point)
-            
-            // Reset cursor
-            document.body.style.cursor = 'pointer';
-        } else {
-            tooltip.style.opacity = 0;
-            document.body.style.cursor = 'default';
-        }
+        // Handle resize
+        window.addEventListener('resize', () => {
+             Plotly.Plots.resize(this.divId);
+        });
     }
 
     updatePoints(points3d, labels) {
-        this.labels = labels;
+        // points3d: [[x,y,z], ...]
+        // labels: ["text", ...]
         
-        // Remove old mesh
-        if (this.pointsMesh) {
-            this.scene.remove(this.pointsMesh);
-            this.pointsMesh.geometry.dispose();
-            this.pointsMesh.material.dispose();
-        }
+        const width = this.container.offsetWidth || window.innerWidth * 0.9;
+        const markerSize = getMarkerSize(width);
 
-        const geometry = new THREE.BufferGeometry();
-        const positions = new Float32Array(points3d.length * 3);
-        const colors = new Float32Array(points3d.length * 3);
+        // We will create one trace for simplicity, but coloring each point differently 
+        // OR mimicking the category style if we can guess. 
+        // Since we don't have categories, let's treat each point as a separate "trace" 
+        // creates too many legend items.
+        // Instead, let's make one trace with an array of colors.
         
-        const color1 = new THREE.Color(0x00ff88);
-        const color2 = new THREE.Color(0x00aaff);
+        // Assign colors cyclically
+        const pointColors = points3d.map((_, i) => defaultColors[i % defaultColors.length]);
 
-        points3d.forEach((pt, i) => {
-            // Normalize/Scale points to fit in view
-            // Simple normalization to -2..2 range
-            positions[i * 3] = pt[0];
-            positions[i * 3 + 1] = pt[1];
-            positions[i * 3 + 2] = pt[2];
+        const trace = {
+            x: points3d.map(p => p[0]),
+            y: points3d.map(p => p[1]),
+            z: points3d.map(p => p[2]),
+            mode: 'markers',
+            marker: {
+                color: pointColors,
+                size: markerSize,
+                opacity: 0.8,
+                line: {
+                    color: 'rgba(255, 255, 255, 0.2)',
+                    width: 0.5,
+                }
+            },
+            text: labels.map(l => addBr(l)),
+            hoverinfo: "text",
+            hoverlabel: {
+                bgcolor: "#fff",
+                bordercolor: "#fff",
+                font: {
+                    color: "#050505",
+                    family: 'Inter, sans-serif'
+                },
+            },
+            type: 'scatter3d'
+        };
 
-            // Mix colors based on position
-            const mixedColor = color1.clone().lerp(color2, (pt[0] + 2) / 4);
-            colors[i * 3] = mixedColor.r;
-            colors[i * 3 + 1] = mixedColor.g;
-            colors[i * 3 + 2] = mixedColor.b;
-        });
+        const layout = {
+            autosize: true,
+            height: 480,
+            margin: { l: 0, r: 0, b: 0, t: 0 },
+            paper_bgcolor: "#fff",
+            showlegend: false, 
+            scene: {
+                xaxis: { tickfont: { size: 10, color: 'rgb(107, 107, 107)' }, title: '' },
+                yaxis: { tickfont: { size: 10, color: 'rgb(107, 107, 107)' }, title: '' },
+                zaxis: { tickfont: { size: 10, color: 'rgb(107, 107, 107)' }, title: '' },
+                aspectmode: 'cube',
+                camera: {
+                    eye: { x: 1.5, y: 1.5, z: 1.5 }
+                }
+            }
+        };
 
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        const config = {
+            modeBarButtonsToRemove: ['pan3d', 'resetCameraLastSave3d', 'toImage', 'tableRotation'],
+            displaylogo: false,
+            responsive: true,
+            displayModeBar: false
+        };
 
-        // Create texture for point
-        const sprite = new THREE.TextureLoader().load('https://threejs.org/examples/textures/sprites/disc.png');
-
-        const material = new THREE.PointsMaterial({ 
-            size: 0.2, 
-            vertexColors: true, 
-            map: sprite, 
-            transparent: true,
-            alphaTest: 0.5,
-            sizeAttenuation: true
-        });
-
-        this.pointsMesh = new THREE.Points(geometry, material);
-        this.scene.add(this.pointsMesh);
+        Plotly.newPlot(this.divId, [trace], layout, config);
         
-        // Center the camera on the points roughly
-        // (OrbitControls handles looking at 0,0,0)
+        // Start rotation animation
+        //this.startRotation();
     }
-
-    animate() {
-        requestAnimationFrame(this.animate.bind(this));
+    
+    startRotation() {
+        if(this.animationFrame) cancelAnimationFrame(this.animationFrame);
         
-        this.controls.update();
-
-        // Subtle pulse or movement could go here
-
-        this.renderer.render(this.scene, this.camera);
+        let angle = 0;
+        const rotate = () => {
+            angle += 0.002;
+            const r = 1.8;
+            // Use Plotly.animate or relayout for camera
+            // relayout is often smoother for just camera
+            Plotly.relayout(this.divId, {
+                'scene.camera.eye': { 
+                    x: r * Math.cos(angle), 
+                    y: r * Math.sin(angle), 
+                    z: 1.5 
+                }
+            });
+            this.animationFrame = requestAnimationFrame(rotate);
+        };
+        rotate();
     }
 }
 
 // Application Orchestrator
 const app = {
     embeddingManager: new EmbeddingManager(),
-    visualizer: new Visualizer('canvas-container'),
+    visualizer: new PlotlyVisualizer('chart-div'),
     
     init: async () => {
         const input = document.getElementById('text-input');
@@ -275,7 +275,7 @@ const app = {
             // UI Loading State
             btn.disabled = true;
             btnText.style.display = 'none';
-            loader.style.display = 'block';
+            if (loader) loader.style.display = 'inline-block';
             status.textContent = `Generating embeddings for ${lines.length} items...`;
 
             try {
@@ -284,14 +284,16 @@ const app = {
                 const progressBar = document.getElementById('progress-bar');
                 const progressLabel = document.getElementById('progress-label');
                 
-                fileProgress.style.display = 'block';
-                progressBar.value = 0;
+                if (fileProgress) {
+                    fileProgress.style.display = 'block';
+                    fileProgress.classList.remove('hidden');
+                    progressBar.style.width = '0%';
+                }
                 
                 const onProgress = (idx, total, text) => {
                     const pct = Math.round((idx / total) * 100);
-                    progressBar.value = pct;
-                    progressLabel.textContent = `${pct}% - Generated for "${text.slice(0, 15)}..."`;
-                    console.log(`[${idx}/${total}] Embedding generated for: ${text}`);
+                    if (progressBar) progressBar.style.width = `${pct}%`;
+                    if (progressLabel) progressLabel.textContent = `${pct}% - Generated for "${text.slice(0, 15)}..."`;
                 };
 
                 const embeddings = await app.embeddingManager.generateEmbeddings(lines, onProgress);
@@ -299,30 +301,14 @@ const app = {
                 // 2. Reduce Dimensions (384 -> 3)
                 const reduced = DimensionalityReducer.reduce(embeddings, 3);
                 
-                // Normalize reduced coordinates to be roughly unit sphere size * spread
-                // Find bounds
-                let min = [Infinity, Infinity, Infinity];
-                let max = [-Infinity, -Infinity, -Infinity];
-                reduced.forEach(pt => {
-                    for(let i=0; i<3; i++) {
-                        if(pt[i] < min[i]) min[i] = pt[i];
-                        if(pt[i] > max[i]) max[i] = pt[i];
-                    }
-                });
-                
-                const range = max.map((mx, i) => mx - min[i] || 1); // Avoid div by 0
-                const scale = 4.0; // Target spread size
-                
-                const normalizedPoints = reduced.map(pt => [
-                    ((pt[0] - min[0]) / range[0]) * scale - (scale/2),
-                    ((pt[1] - min[1]) / range[1]) * scale - (scale/2),
-                    ((pt[2] - min[2]) / range[2]) * scale - (scale/2)
-                ]);
-
                 // 3. Update Visualizer
-                app.visualizer.updatePoints(normalizedPoints, lines);
+                // No normalization needed as PCA output is usually centered around 0 and Plotly auto-scales axis
+                // But user snippet had some logic about traces. We just pass raw PCA output?
+                // PCA output scales with variance. Plotly handles autosizing well.
+                
+                app.visualizer.updatePoints(reduced, lines);
                 status.textContent = `Visualizing ${lines.length} embeddings.`;
-                fileProgress.style.display = 'none';
+                if (fileProgress) fileProgress.style.display = 'none';
 
             } catch (err) {
                 console.error(err);
@@ -330,7 +316,7 @@ const app = {
             } finally {
                 btn.disabled = false;
                 btnText.style.display = 'inline';
-                loader.style.display = 'none';
+                if (loader) loader.style.display = 'none';
             }
         });
     }
